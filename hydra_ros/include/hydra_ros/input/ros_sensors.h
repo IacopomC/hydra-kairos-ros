@@ -36,14 +36,6 @@
 #include <hydra/input/camera.h>
 #include <hydra/input/sensor.h>
 
-namespace ros {
-class NodeHandle;
-}
-
-namespace rosbag {
-class Bag;
-}
-
 namespace hydra {
 
 struct InvalidSensor : Sensor {
@@ -65,7 +57,18 @@ struct InvalidSensor : Sensor {
 
 struct RosExtrinsics : SensorExtrinsics {
   struct Config {
+    //! @brief Override camera info frame ID
     std::string sensor_frame = "";
+    //! @brief Override global robot frame ID
+    std::string robot_frame = "";
+    //! @brief Amount of time before warning about missing TF (0 disables warning)
+    double warning_timeout_s = 10.0;
+    //! @brief Amount of time before forcing Hydra to exit (0 disables exit)
+    double error_timeout_s = 0.0;
+    //! @brief Sample period for looking up extrinsics transform
+    double wait_duration_s = 0.1;
+    //! @brief TF lookup verbosity
+    int verbosity = 3;
   } const config;
 
   explicit RosExtrinsics(const Config& config);
@@ -77,7 +80,15 @@ struct RosExtrinsics : SensorExtrinsics {
 
 struct RosCamera : InvalidSensor {
   struct Config : Sensor::Config {
+    //! @brief Optional namespace for overriding Hydra's default sensor namespaces
     std::string ns = "";
+    //! @brief Amount of time before warning about missing camera info (0 disables
+    //! warning)
+    double warning_timeout_s = 10.0;
+    //! @brief Amount of time to wait before forcing Hydra to exit (0 disables exit)
+    double error_timeout_s = 0.0;
+    //! @brief Whether or not to use latching for subscriber
+    bool latch_info_sub = false;
   } const config;
 
   explicit RosCamera(const Config& config);
@@ -87,33 +98,14 @@ struct RosCamera : InvalidSensor {
       config::RegistrationWithConfig<Sensor, RosCamera, Config>("camera_info");
 };
 
-struct RosbagCamera : InvalidSensor {
-  struct Config : Sensor::Config {
-    std::string topic = "";
-  } const config;
-
-  explicit RosbagCamera(const Config& config);
-
- private:
-  inline static const auto r_ =
-      config::RegistrationWithConfig<Sensor, RosbagCamera, Config>(
-          "rosbag_camera_info");
-};
-
 void declare_config(RosExtrinsics::Config& config);
 
 void declare_config(RosCamera::Config& config);
-
-void declare_config(RosbagCamera::Config& config);
 
 namespace input {
 
 config::VirtualConfig<Sensor> loadSensor(const config::VirtualConfig<Sensor>& sensor,
                                          const std::string& name);
 
-config::VirtualConfig<Sensor> loadSensor(const rosbag::Bag& bag,
-                                         const config::VirtualConfig<Sensor>& sensor);
-
 }  // namespace input
-
 }  // namespace hydra

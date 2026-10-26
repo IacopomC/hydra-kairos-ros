@@ -41,21 +41,16 @@
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
 #include <hydra/common/global_info.h>
-#include <ros/ros.h>
-#include <rosbag/bag.h>
-#include <rosbag/view.h>
-#include <sensor_msgs/CameraInfo.h>
+#include <ianvs/message_wait_functor.h>
 
-#include "hydra_ros/utils/pose_cache.h"
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
+
 #include "hydra_ros/utils/tf_lookup.h"
 
 namespace hydra {
 
-struct CameraInfoFunctor {
-  void callback(const sensor_msgs::CameraInfo::ConstPtr& info) { msg = info; }
-
-  sensor_msgs::CameraInfo::ConstPtr msg;
-};
+using sensor_msgs::msg::CameraInfo;
 
 struct TempCameraConfig : Camera::Config {};
 
@@ -65,83 +60,88 @@ void declare_config(TempCameraConfig& config) {
   base<Sensor::Config>(config);
 }
 
-void fillConfigFromInfo(const sensor_msgs::CameraInfo& msg,
-                        Camera::Config& cam_config) {
+void fillConfigFromInfo(const CameraInfo& msg, Camera::Config& cam_config) {
   cam_config.width = msg.width;
   cam_config.height = msg.height;
-  cam_config.fx = msg.K[0];
-  cam_config.fy = msg.K[4];
-  cam_config.cx = msg.K[2];
-  cam_config.cy = msg.K[5];
+  cam_config.fx = msg.k[0];
+  cam_config.fy = msg.k[4];
+  cam_config.cx = msg.k[2];
+  cam_config.cy = msg.k[5];
 }
 
-std::optional<sensor_msgs::CameraInfo> getCameraInfo(const std::string& ns) {
-  ros::NodeHandle nh(ns);
-  CameraInfoFunctor functor;
-  ros::Subscriber sub =
-      nh.subscribe("camera_info", 1, &CameraInfoFunctor::callback, &functor);
-
-  const auto resolved_topic = nh.resolveName("camera_info");
+std::optional<sensor_msgs::msg::CameraInfo> getCameraInfo(
+    const RosCamera::Config& config, const std::string& ns) {
+  auto nh = ianvs::NodeHandle::this_node(ns);
+  const auto resolved_topic = nh.resolve_name("camera_info", false);
   LOG(INFO) << "Waiting for CameraInfo on " << resolved_topic
             << " to initialize sensor model";
 
-  ros::WallRate r(10);
-  while (ros::ok()) {
-    if (functor.msg) {
+  const auto start = nh.now();
+  const auto qos = rclcpp::QoS(1).durability(
+      config.latch_info_sub ? rclcpp::DurabilityPolicy::TransientLocal
+                            : rclcpp::DurabilityPolicy::Volatile);
+  const size_t timeout = std::floor(config.warning_timeout_s * 1000);
+
+  std::optional<sensor_msgs::msg::CameraInfo> msg;
+  while (!msg && rclcpp::ok()) {
+    msg = ianvs::getSingleMessage<CameraInfo>(nh, "camera_info", true, qos, timeout);
+    if (!msg) {
+      LOG(WARNING) << "Waiting for CameraInfo on topic '" << resolved_topic << "'";
+    }
+
+    const auto diff = nh.now() - start;
+    if (config.error_timeout_s && (diff.seconds() > config.error_timeout_s)) {
+      LOG(ERROR) << "Sensor intrinsics lookup timed out on '" << resolved_topic << "'";
       break;
     }
-
-    ros::spinOnce();
-    r.sleep();
   }
 
-  if (!functor.msg) {
-    LOG(ERROR) << "did not receive message on " << resolved_topic;
-    return std::nullopt;
-  }
-
-  return *functor.msg;
+  return msg;
 }
 
-std::optional<sensor_msgs::CameraInfo> getCameraInfo(const rosbag::Bag& bag,
-                                                     const std::string& topic) {
-  rosbag::View view(bag, rosbag::TopicQuery(std::vector<std::string>{topic}));
-  for (const auto& m : view) {
-    const auto msg = m.instantiate<sensor_msgs::CameraInfo>();
-    if (!msg) {
-      LOG(ERROR) << "Topic '" << topic << "' is invalid!";
-      return std::nullopt;
+ParamSensorExtrinsics::Config lookupExtrinsics(const RosExtrinsics::Config& config,
+                                               const std::string& sensor_frame,
+                                               const std::string& robot_frame) {
+  LOG(INFO) << "Looking for sensor extrinsics '" << robot_frame << "_T_" << sensor_frame
+            << "' via TF";
+
+  auto nh = ianvs::NodeHandle::this_node();
+  auto clock = nh.node().get<rclcpp::node_interfaces::NodeClockInterface>();
+
+  tf2_ros::Buffer buffer(clock->get_clock());
+  tf2_ros::TransformListener listener(buffer);
+
+  size_t warning_tries = config.warning_timeout_s / config.wait_duration_s;
+
+  const auto start = nh.now();
+  PoseStatus status;
+  while (!status && rclcpp::ok()) {
+    std::string message;
+    status = lookupTransform(buffer,
+                             std::nullopt,
+                             robot_frame,
+                             sensor_frame,
+                             warning_tries,
+                             config.wait_duration_s,
+                             config.verbosity,
+                             &message);
+    if (!status) {
+      LOG(WARNING) << "Waiting for sensor extrinsics " << message;
     }
 
-    return *msg;
+    const auto diff = nh.now() - start;
+    if (config.error_timeout_s && (diff.seconds() > config.error_timeout_s)) {
+      LOG(ERROR) << "Sensor extrinsics lookup timed out for " << message;
+      break;
+    }
   }
 
-  LOG(ERROR) << "Failed to find topic '" << topic << "' in bag!'";
-  return std::nullopt;
-}
+  CHECK(status.is_valid) << "Could not look up extrinsics from ros!";
 
-ParamSensorExtrinsics::Config lookupExtrinsics(const std::string& sensor_frame) {
-  const auto robot_frame = GlobalInfo::instance().getFrames().robot;
-  const auto pose = lookupTransform(robot_frame, sensor_frame);
-  CHECK(pose.is_valid) << "Could not look up extrinsics from ros!";
-
-  ParamSensorExtrinsics::Config config;
-  config.body_R_sensor = pose.target_R_source;
-  config.body_p_sensor = pose.target_p_source;
-  return config;
-}
-
-ParamSensorExtrinsics::Config lookupExtrinsics(const rosbag::Bag& bag,
-                                               const std::string& sensor_frame) {
-  PoseCache cache(bag, true);
-  const auto robot_frame = GlobalInfo::instance().getFrames().robot;
-  const auto pose = cache.lookupPose(0, robot_frame, sensor_frame);
-  CHECK(pose) << "Could not look up extrinsics from bag!";
-
-  ParamSensorExtrinsics::Config config;
-  config.body_R_sensor = pose.to_R_from;
-  config.body_p_sensor = pose.to_p_from;
-  return config;
+  ParamSensorExtrinsics::Config params;
+  params.body_R_sensor = status.target_R_source;
+  params.body_p_sensor = status.target_p_source;
+  return params;
 }
 
 RosExtrinsics::RosExtrinsics(const Config&) {
@@ -152,14 +152,17 @@ RosCamera::RosCamera(const Config&) {
   throw std::runtime_error("Cannot directly insantiate RosExtrinsics object!");
 }
 
-RosbagCamera::RosbagCamera(const Config&) {
-  throw std::runtime_error("Cannot directly insantiate RosExtrinsics object!");
-}
-
 void declare_config(RosExtrinsics::Config& config) {
   using namespace config;
   name("RosExtrinsics::Config");
   field(config.sensor_frame, "sensor_frame");
+  field(config.robot_frame, "robot_frame");
+  field(config.warning_timeout_s, "warning_timeout_s", "s");
+  field(config.error_timeout_s, "error_timeout_s", "s");
+  field(config.wait_duration_s, "wait_duration_s", "s");
+  field(config.verbosity, "verbosity");
+  check(config.warning_timeout_s, GE, 0.0, "warning_timeout_s");
+  check(config.error_timeout_s, GE, 0.0, "error_timeout_s");
 }
 
 void declare_config(RosCamera::Config& config) {
@@ -167,14 +170,11 @@ void declare_config(RosCamera::Config& config) {
   name("RosCamera::Config");
   base<Sensor::Config>(config);
   field(config.ns, "ns");
-}
-
-void declare_config(RosbagCamera::Config& config) {
-  using namespace config;
-  name("RosbagCamera::Config");
-  base<Sensor::Config>(config);
-  field(config.topic, "camera_info_topic");
-  checkCondition(!config.topic.empty(), "camera info topic required");
+  field(config.warning_timeout_s, "warning_timeout_s", "s");
+  field(config.error_timeout_s, "error_timeout_s", "s");
+  field(config.latch_info_sub, "latch_info_sub");
+  check(config.warning_timeout_s, GE, 0.0, "warning_timeout_s");
+  check(config.error_timeout_s, GE, 0.0, "error_timeout_s");
 }
 
 namespace input {
@@ -182,8 +182,7 @@ namespace input {
 using VirtualSensor = config::VirtualConfig<Sensor>;
 
 VirtualSensor loadExtrinsics(const VirtualSensor& sensor,
-                             const std::string& sensor_frame = "",
-                             const rosbag::Bag* bag = nullptr) {
+                             const std::string& sensor_frame = "") {
   if (!sensor) {
     return sensor;
   }
@@ -197,13 +196,15 @@ VirtualSensor loadExtrinsics(const VirtualSensor& sensor,
   const auto contents = config::toYaml(base_config.extrinsics);
   const auto derived = config::fromYaml<RosExtrinsics::Config>(contents);
   const auto frame = derived.sensor_frame.empty() ? sensor_frame : derived.sensor_frame;
+  const auto parent = derived.robot_frame.empty()
+                          ? GlobalInfo::instance().getFrames().robot
+                          : derived.robot_frame;
   if (frame.empty()) {
     LOG(ERROR) << "sensor frame required if not constructing from camera info!";
     return {};
   }
 
-  const auto info = bag ? lookupExtrinsics(*bag, frame) : lookupExtrinsics(frame);
-
+  const auto info = lookupExtrinsics(derived, frame, parent);
   config::VirtualConfig<SensorExtrinsics> new_config(info);
   base_contents["extrinsics"] = config::toYaml(new_config);
   return config::fromYaml<VirtualSensor>(base_contents);
@@ -219,7 +220,7 @@ VirtualSensor loadSensor(const VirtualSensor& sensor, const std::string& sensor_
 
   const auto ns =
       derived.ns.empty() ? "~/input/" + sensor_name + std::string("/rgb") : derived.ns;
-  const auto msg = getCameraInfo(ns);
+  const auto msg = getCameraInfo(derived, ns);
   if (!msg) {
     return {};
   }
@@ -234,28 +235,5 @@ VirtualSensor loadSensor(const VirtualSensor& sensor, const std::string& sensor_
   return new_sensor;
 }
 
-VirtualSensor loadSensor(const rosbag::Bag& bag, const VirtualSensor& sensor) {
-  if (!sensor || sensor.getType() != "rosbag_camera_info") {
-    return loadExtrinsics(sensor, "", &bag);
-  }
-
-  const auto contents = config::toYaml(sensor);
-  const auto derived = config::fromYaml<RosbagCamera::Config>(contents);
-  const auto msg = getCameraInfo(bag, derived.topic);
-  if (!msg) {
-    return {};
-  }
-
-  // get base class fields (all other derived fields will be overriden by ros)
-  Camera::Config config = config::fromYaml<TempCameraConfig>(contents);
-  fillConfigFromInfo(*msg, config);
-
-  VirtualSensor new_sensor(config);
-  new_sensor = loadExtrinsics(new_sensor, msg->header.frame_id, &bag);
-  LOG(INFO) << "Initialized camera as " << std::endl << config::toString(new_sensor);
-  return new_sensor;
-}
-
 }  // namespace input
-
 }  // namespace hydra

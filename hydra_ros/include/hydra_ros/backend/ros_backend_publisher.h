@@ -34,6 +34,12 @@
  * -------------------------------------------------------------------------- */
 #pragma once
 #include <hydra/backend/backend_module.h>
+#include <ianvs/node_handle.h>
+#include <pose_graph_tools_ros/conversions.h>
+#include <tf2_ros/transform_broadcaster.h>
+
+#include <rclcpp/publisher.hpp>
+#include <visualization_msgs/msg/marker.hpp>
 
 #include "hydra_ros/utils/dsg_streaming_interface.h"
 
@@ -42,10 +48,22 @@ namespace hydra {
 class RosBackendPublisher : public BackendModule::Sink {
  public:
   struct Config {
-    bool publish_mesh = false;
+    //! @brief Configuration for dsg publisher
+    DsgSender::Config dsg_sender;
+    //! @brief Publish odom to map transform
+    bool publish_backend_tf = false;
+    //! @brief Frame to use when publishing map_T_robot. An empty frame disables
+    //! publishing
+    std::string tf_pub_robot_frame = "";
+    //! @brief Optional override for the map frame ID (defaults to current Hydra global
+    //! setting)
+    std::string tf_pub_map_frame = "";
+    //! @brief Optional override for the odom frame ID (defaults to current Hydra global
+    //! setting)
+    std::string tf_pub_odom_frame = "";
   } const config;
 
-  explicit RosBackendPublisher(const ros::NodeHandle& nh);
+  explicit RosBackendPublisher(ianvs::NodeHandle nh);
 
   virtual ~RosBackendPublisher() = default;
 
@@ -57,21 +75,27 @@ class RosBackendPublisher : public BackendModule::Sink {
 
  protected:
   virtual void publishMeshGraph(const DynamicSceneGraph& graph,
-                                const kimera_pgmo::DeformationGraph& dgraph) const;
+                                const kimera_pgmo::DeformationGraph& dgraph,
+                                const uint64_t& stamp) const;
 
   virtual void publishPoseGraph(const DynamicSceneGraph& graph,
-                                const kimera_pgmo::DeformationGraph& dgraph) const;
+                                const kimera_pgmo::DeformationGraph& dgraph,
+                                const uint64_t& stamp) const;
 
   virtual void publishDeformationGraphViz(const kimera_pgmo::DeformationGraph& dgraph,
                                           size_t timestamp_ns) const;
 
+  virtual void publishTf(const DynamicSceneGraph& graph,
+                         const kimera_pgmo::DeformationGraph& dgraph) const;
+
  protected:
-  ros::NodeHandle nh_;
-  ros::Publisher mesh_mesh_edges_pub_;
-  ros::Publisher pose_mesh_edges_pub_;
-  ros::Publisher pose_graph_pub_;
-  ros::Publisher mesh_graph_pub_;
+  ianvs::NodeHandle nh_;
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr mesh_mesh_edges_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pose_mesh_edges_pub_;
+  pose_graph_tools::PoseGraphPublisher pose_graph_pub_;
+  pose_graph_tools::PoseGraphPublisher mesh_graph_pub_;
   std::unique_ptr<DsgSender> dsg_sender_;
+  mutable tf2_ros::TransformBroadcaster tf_br_;
 };
 
 }  // namespace hydra

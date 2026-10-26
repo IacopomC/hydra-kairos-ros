@@ -34,64 +34,73 @@
  * -------------------------------------------------------------------------- */
 #include <config_utilities/config_utilities.h>
 #include <config_utilities/external_registry.h>
-#include <config_utilities/logging/log_to_stdout.h>
-#include <config_utilities/parsing/ros.h>
+#include <config_utilities/logging/log_to_glog.h>
+#include <config_utilities/parsing/context.h>
 #include <config_utilities/settings.h>
 #include <glog/logging.h>
+#include <ianvs/node_init.h>
 
 #include <filesystem>
 
-#include "hydra_visualizer/dsg_visualizer.h"
+#include <rclcpp/rclcpp.hpp>
+
+#include "hydra_visualizer/visualizer_node.h"
 
 namespace hydra::visualizer {
-struct ExternalPluginConfig {
-  bool allow_plugins = true;
-  bool verbose_plugins = false;
-  bool trace_plugin_allocations = false;
-  std::vector<std::string> paths;
+
+struct NodeSettings {
+  int glog_verbosity = 1;
+  int glog_level = 0;
+  std::vector<std::string> external_library_paths;
 };
 
-void declare_config(ExternalPluginConfig& config) {
+void declare_config(NodeSettings& config) {
   using namespace config;
-  name("ExternalPluginConfig");
-  field(config.allow_plugins, "allow_plugins");
-  field(config.verbose_plugins, "verbose_plugins");
-  field(config.trace_plugin_allocations, "trace_plugin_allocations");
-  field(config.paths, "paths");
+  name("NodeSettings");
+  field(config.glog_verbosity, "glog_verbosity");
+  field(config.glog_level, "glog_level");
+  field(config.external_library_paths, "external_library_paths");
 }
 
 }  // namespace hydra::visualizer
 
 int main(int argc, char** argv) {
-  ros::init(argc, argv, "hydra_visualizer_node");
+  config::initContext(argc, argv, true);
+  config::setConfigSettingsFromContext();
+  const auto node_settings = config::fromContext<hydra::visualizer::NodeSettings>();
 
-  FLAGS_minloglevel = 0;
+  [[maybe_unused]] const auto guard =
+      ianvs::init_node(argc, argv, "hydra_visualizer_node");
+  auto nh = ianvs::NodeHandle::this_node("~");
+
+  FLAGS_minloglevel = node_settings.glog_level;
+  FLAGS_v = node_settings.glog_verbosity;
   FLAGS_logtostderr = 1;
   FLAGS_colorlogtostderr = 1;
 
-  google::ParseCommandLineFlags(&argc, &argv, true);
+  // TODO(nathan) ROS2 arguments and GLOG do not mix because both Google and OSRF have
+  // bad conventions
   google::InitGoogleLogging(argv[0]);
   google::InstallFailureSignalHandler();
 
-  ros::NodeHandle nh("~");
-  const auto plugin_config =
-      config::fromRos<hydra::visualizer::ExternalPluginConfig>(nh, "external_plugins");
-  ROS_INFO_STREAM("Plugins:\n" << config::toString(plugin_config));
+  config::Settings().setLogger("glog");
 
-  auto& settings = config::Settings();
-  settings.allow_external_libraries = plugin_config.allow_plugins;
-  settings.verbose_external_load = plugin_config.verbose_plugins;
-  settings.print_external_allocations = plugin_config.trace_plugin_allocations;
-  const auto plugins = config::loadExternalFactories(plugin_config.paths);
+  VLOG(1) << "Settings:\n" << config::toString(node_settings);
 
+  [[maybe_unused]] const auto plugins =
+      config::loadExternalFactories(node_settings.external_library_paths);
+
+  rclcpp::executors::MultiThreadedExecutor executor;
   {  // start visualizer scope
-    const auto config = config::fromRos<hydra::DsgVisualizer::Config>(nh);
-    ROS_INFO_STREAM("Config:\n" << config::toString(config));
-    auto node = std::make_unique<hydra::DsgVisualizer>(config);
+    const auto config = config::fromContext<hydra::DsgVisualizer::Config>();
+    VLOG(1) << "Config:\n" << config::toString(config);
+    auto node = std::make_shared<hydra::DsgVisualizer>(config, nh);
     node->start();
 
-    ros::spin();
+    executor.add_node(nh.as<rclcpp::node_interfaces::NodeBaseInterface>());
+    executor.spin();
   }  // end visualizer scope
 
+  rclcpp::shutdown();
   return 0;
 }

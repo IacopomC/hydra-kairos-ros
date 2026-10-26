@@ -37,36 +37,35 @@
 #include <config_utilities/config.h>
 #include <config_utilities/printing.h>
 #include <config_utilities/validation.h>
-#include <geometry_msgs/TransformStamped.h>
 #include <glog/logging.h>
 #include <hydra/common/global_info.h>
-#include <tf2_eigen/tf2_eigen.h>
+#include <ianvs/node_handle.h>
 #include <tf2_ros/transform_listener.h>
+
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 namespace hydra {
 
-PoseStatus lookupTransform(const std::string& target,
-                           const std::string& source,
-                           double wait_duration_s,
-                           int verbosity) {
-  tf2_ros::Buffer buffer;
-  tf2_ros::TransformListener listener(buffer);
-  return lookupTransform(
-      buffer, std::nullopt, target, source, std::nullopt, wait_duration_s, verbosity);
+std::chrono::nanoseconds TFLookup::Config::buffer_size_ns() const {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::duration<double>(buffer_size_s));
 }
 
 PoseStatus lookupTransform(const tf2_ros::Buffer& buffer,
-                           const std::optional<ros::Time>& stamp,
+                           const std::optional<rclcpp::Time>& stamp,
                            const std::string& target,
                            const std::string& source,
-                           std::optional<size_t> max_tries,
+                           size_t max_tries,
                            double wait_duration_s,
-                           int verbosity) {
-  ros::WallRate tf_wait_rate(1.0 / wait_duration_s);
+                           int verbosity,
+                           std::string* message) {
+  using namespace std::chrono_literals;
+  rclcpp::WallRate tf_wait_rate(1.0 / wait_duration_s);
   std::string stamp_suffix;
   if (stamp) {
     std::stringstream ss;
-    ss << " @ " << stamp.value().toNSec() << " [ns]";
+    ss << " @ " << stamp.value().nanoseconds() << " [ns]";
     stamp_suffix = ss.str();
   }
 
@@ -75,50 +74,56 @@ PoseStatus lookupTransform(const tf2_ros::Buffer& buffer,
   VLOG(verbosity) << "Looking up transform " << target << "_T_" << source
                   << stamp_suffix;
 
-  const auto lookup_time = stamp.value_or(ros::Time());
+  const auto lookup_time = stamp.value_or(rclcpp::Time());
   size_t attempt_number = 0;
-  while (ros::ok()) {
-    VLOG(verbosity) << "Attempting to lookup tf @ " << lookup_time.toNSec()
+  while (rclcpp::ok()) {
+    VLOG(verbosity) << "Attempting to lookup tf @ " << lookup_time.nanoseconds()
                     << " [ns]: " << attempt_number << " / "
-                    << (max_tries ? std::to_string(max_tries.value()) : "n/a");
-    if (max_tries && attempt_number >= *max_tries) {
+                    << (max_tries ? std::to_string(max_tries) : "n/a");
+    if (max_tries && attempt_number >= max_tries) {
       break;
     }
 
-    if (buffer.canTransform(target, source, lookup_time, ros::Duration(0), &err_str)) {
+    if (buffer.canTransform(
+            target, source, lookup_time, rclcpp::Duration(0ns), &err_str)) {
       have_transform = true;
       break;
     }
 
     ++attempt_number;
     tf_wait_rate.sleep();
-    ros::spinOnce();
+    // TODO(nathan) spin if needed
   }
 
   if (!have_transform) {
-    LOG(ERROR) << "Failed to find: " << target << "_T_" << source << stamp_suffix
-               << ": " << err_str;
+    std::stringstream ss;
+    ss << "'" << target << "_T_" << source << stamp_suffix;
+    if (!err_str.empty()) {
+      ss << "' (last error: '" << err_str << "')";
+    }
+
+    if (message) {
+      *message = ss.str();
+    } else {
+      LOG(ERROR) << "Failed to find " << ss.str();
+    }
+
     return {false, {}, {}};
   }
 
-  geometry_msgs::TransformStamped transform;
+  geometry_msgs::msg::TransformStamped transform;
   try {
     transform = buffer.lookupTransform(target, source, lookup_time);
   } catch (const tf2::TransformException& ex) {
-    LOG(ERROR) << "Failed to look up: " << target << "_T_" << source << stamp_suffix;
+    LOG(ERROR) << "Failed to look up available transform " << target << "_T_" << source
+               << stamp_suffix;
     return {false, {}, {}};
   }
 
-  geometry_msgs::Pose curr_pose;
-  curr_pose.position.x = transform.transform.translation.x;
-  curr_pose.position.y = transform.transform.translation.y;
-  curr_pose.position.z = transform.transform.translation.z;
-  curr_pose.orientation = transform.transform.rotation;
-
   PoseStatus to_return;
   to_return.is_valid = true;
-  tf2::convert(curr_pose.position, to_return.target_p_source);
-  tf2::convert(curr_pose.orientation, to_return.target_R_source);
+  tf2::fromMsg(transform.transform.translation, to_return.target_p_source);
+  tf2::fromMsg(transform.transform.rotation, to_return.target_R_source);
   to_return.target_R_source.normalize();
   return to_return;
 }
@@ -134,22 +139,16 @@ void declare_config(TFLookup::Config& config) {
 
 TFLookup::TFLookup(const Config& config)
     : config(config),
-      nh(""),
-      buffer(ros::Duration(config.buffer_size_s)),
+      buffer(ianvs::NodeHandle::this_node().clock(), config.buffer_size_ns()),
       listener(buffer) {}
 
 PoseStatus TFLookup::getBodyPose(uint64_t timestamp_ns) const {
-  // negative or 0 for tf_max_tries means we spin forever if the transform isn't present
-  const std::optional<size_t> max_tries =
-      config.max_tries > 0 ? std::optional<size_t>(config.max_tries) : std::nullopt;
-
-  ros::Time curr_ros_time;
-  curr_ros_time.fromNSec(timestamp_ns);
+  rclcpp::Time curr_ros_time(timestamp_ns);
   return lookupTransform(buffer,
                          curr_ros_time,
                          GlobalInfo::instance().getFrames().odom,
                          GlobalInfo::instance().getFrames().robot,
-                         max_tries,
+                         config.max_tries,
                          config.wait_duration_s,
                          config.verbosity);
 }

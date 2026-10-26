@@ -33,12 +33,15 @@
  * purposes notwithstanding any copyright notation herein.
  * -------------------------------------------------------------------------- */
 #pragma once
-#include <config_utilities/factory.h>
-#include <ros/ros.h>
-#include <std_msgs/String.h>
-#include <std_srvs/Empty.h>
+
+#include <ianvs/node_handle.h>
 
 #include <filesystem>
+
+#include <rclcpp/service.hpp>
+#include <rclcpp/subscription.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <std_srvs/srv/empty.hpp>
 
 #include "hydra_visualizer/io/graph_wrapper.h"
 
@@ -47,11 +50,12 @@ namespace hydra {
 class GraphFileWrapper : public GraphWrapper {
  public:
   struct Config {
+    std::string frame_id;
     std::filesystem::path filepath;
     std::string wrapper_ns = "~/graph";
   } const config;
 
-  explicit GraphFileWrapper(const Config& config);
+  GraphFileWrapper(const Config& config, ianvs::NodeHandle);
 
   bool hasChange() const override;
 
@@ -59,22 +63,18 @@ class GraphFileWrapper : public GraphWrapper {
 
   StampedGraph get() const override;
 
-  bool reload(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res);
+  void reload(const std_srvs::srv::Empty::Request::SharedPtr& req,
+              std_srvs::srv::Empty::Response::SharedPtr res);
 
-  void load(const std_msgs::String& msg);
+  void load(const std_msgs::msg::String::ConstSharedPtr& msg);
 
  private:
-  ros::NodeHandle nh_;
   bool has_change_;
+  ianvs::NodeHandle nh_;
   std::filesystem::path filepath_;
   spark_dsg::DynamicSceneGraph::Ptr graph_;
-  ros::ServiceServer service_;
-  ros::Subscriber sub_;
-
-  inline static const auto registration_ =
-      config::RegistrationWithConfig<GraphWrapper,
-                                     GraphFileWrapper,
-                                     GraphFileWrapper::Config>("GraphFromFile");
+  rclcpp::Service<std_srvs::srv::Empty>::SharedPtr service_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_;
 };
 
 void declare_config(GraphFileWrapper::Config& config);

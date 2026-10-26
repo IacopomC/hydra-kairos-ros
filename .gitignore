@@ -212,3 +212,5 @@ pyrightconfig.json
 
 # VS Code
 .vscode/
+
+.clangd

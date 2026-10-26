@@ -39,18 +39,27 @@
 #include <glog/logging.h>
 
 namespace hydra {
+namespace {
+static const auto registration =
+    config::RegistrationWithConfig<GraphWrapper,
+                                   GraphZmqWrapper,
+                                   GraphZmqWrapper::Config,
+                                   ianvs::NodeHandle>("GraphFromZmq");
+}
 
 using spark_dsg::DynamicSceneGraph;
 
 void declare_config(GraphZmqWrapper::Config& config) {
   using namespace config;
   name("GraphZmqWrapper::Config");
+  field(config.frame_id, "frame_id");
   field(config.url, "url");
   field(config.num_threads, "num_threads");
   field(config.poll_time_ms, "poll_time_ms");
+  checkCondition(!config.frame_id.empty(), "'frame_id' must be non-empty!");
 }
 
-GraphZmqWrapper::GraphZmqWrapper(const Config& config)
+GraphZmqWrapper::GraphZmqWrapper(const Config& config, ianvs::NodeHandle)
     : config(config::checkValid(config)), has_change_(false), should_shutdown_(false) {
   receiver_.reset(new spark_dsg::ZmqReceiver(config.url, config.num_threads));
   recv_thread_.reset(new std::thread(&GraphZmqWrapper::spin, this));
@@ -83,7 +92,7 @@ StampedGraph GraphZmqWrapper::get() const {
     return {nullptr};
   }
 
-  return {graph_->clone()};
+  return {graph_->clone(), config.frame_id};
 }
 
 void GraphZmqWrapper::spin() {

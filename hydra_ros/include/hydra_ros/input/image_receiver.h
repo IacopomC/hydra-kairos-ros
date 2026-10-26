@@ -33,53 +33,91 @@
  * purposes notwithstanding any copyright notation herein.
  * -------------------------------------------------------------------------- */
 #pragma once
+#include <ianvs/node_handle.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
-#include <sensor_msgs/Image.h>
+
+#include <rclcpp/time.hpp>
+#include <semantic_inference_msgs/msg/feature_image.hpp>
+#include <sensor_msgs/msg/image.hpp>
 
 #include "hydra_ros/input/ros_data_receiver.h"
 
 namespace hydra {
 
-using ImageSimpleFilter = message_filters::SimpleFilter<sensor_msgs::Image>;
+template <typename MsgT>
+struct FilterSub : public message_filters::SimpleFilter<MsgT> {
+  FilterSub(ianvs::NodeHandle nh, const std::string& topic, uint32_t queue_size)
+      : subscriber(nh.create_subscription<MsgT>(
+            topic, queue_size, [this](const typename MsgT::ConstSharedPtr& msg) {
+              this->signalMessage(msg);
+            })) {}
 
-struct ImageSubImpl;
+  typename rclcpp::Subscription<MsgT>::SharedPtr subscriber;
+};
 
 struct ColorSubscriber {
+ public:
+  using MsgType = sensor_msgs::msg::Image;
+  using Filter = message_filters::SimpleFilter<MsgType>;
+
   ColorSubscriber();
-  ColorSubscriber(const ros::NodeHandle& nh, uint32_t queue_size = 1);
+  explicit ColorSubscriber(ianvs::NodeHandle nh, uint32_t queue_size = 1);
   virtual ~ColorSubscriber();
 
-  ImageSimpleFilter& getFilter() const;
-  void fillInput(const sensor_msgs::Image& img, ImageInputPacket& packet) const;
+  Filter& getFilter() const;
+  void fillInput(const sensor_msgs::msg::Image& img, ImageInputPacket& packet) const;
 
  private:
-  std::shared_ptr<ImageSubImpl> impl_;
+  std::shared_ptr<FilterSub<sensor_msgs::msg::Image>> impl_;
 };
 
 struct DepthSubscriber {
+ public:
+  using MsgType = sensor_msgs::msg::Image;
+  using Filter = message_filters::SimpleFilter<MsgType>;
+
   DepthSubscriber();
-  DepthSubscriber(const ros::NodeHandle& nh, uint32_t queue_size = 1);
+  explicit DepthSubscriber(ianvs::NodeHandle nh, uint32_t queue_size = 1);
   virtual ~DepthSubscriber();
 
-  ImageSimpleFilter& getFilter() const;
-  void fillInput(const sensor_msgs::Image& img, ImageInputPacket& packet) const;
+  Filter& getFilter() const;
+  void fillInput(const sensor_msgs::msg::Image& img, ImageInputPacket& packet) const;
 
  private:
-  std::shared_ptr<ImageSubImpl> impl_;
+  std::shared_ptr<FilterSub<sensor_msgs::msg::Image>> impl_;
 };
 
 struct LabelSubscriber {
-  using MsgType = sensor_msgs::Image;
+ public:
+  using MsgType = sensor_msgs::msg::Image;
+  using Filter = message_filters::SimpleFilter<MsgType>;
+
   LabelSubscriber();
-  LabelSubscriber(const ros::NodeHandle& nh, uint32_t queue_size = 1);
+  explicit LabelSubscriber(ianvs::NodeHandle nh, uint32_t queue_size = 1);
   virtual ~LabelSubscriber();
 
-  ImageSimpleFilter& getFilter() const;
-  void fillInput(const sensor_msgs::Image& img, ImageInputPacket& packet) const;
+  Filter& getFilter() const;
+  void fillInput(const sensor_msgs::msg::Image& img, ImageInputPacket& packet) const;
 
  private:
-  std::shared_ptr<ImageSubImpl> impl_;
+  std::shared_ptr<FilterSub<sensor_msgs::msg::Image>> impl_;
+};
+
+struct FeatureSubscriber {
+ public:
+  using MsgType = semantic_inference_msgs::msg::FeatureImage;
+  using Filter = message_filters::SimpleFilter<MsgType>;
+
+  FeatureSubscriber();
+  explicit FeatureSubscriber(ianvs::NodeHandle nh, uint32_t queue_size = 1);
+  virtual ~FeatureSubscriber();
+
+  Filter& getFilter() const;
+  void fillInput(const MsgType& img, ImageInputPacket& packet) const;
+
+ private:
+  std::shared_ptr<FilterSub<semantic_inference_msgs::msg::FeatureImage>> impl_;
 };
 
 template <typename SemanticT>
@@ -87,8 +125,8 @@ class ImageReceiverImpl : public RosDataReceiver {
  public:
   using SemanticMsgPtr = typename SemanticT::MsgType::ConstPtr;
   using Policy =
-      message_filters::sync_policies::ApproximateTime<sensor_msgs::Image,
-                                                      sensor_msgs::Image,
+      message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image,
+                                                      sensor_msgs::msg::Image,
                                                       typename SemanticT::MsgType>;
   using Synchronizer = message_filters::Synchronizer<Policy>;
 
@@ -99,8 +137,8 @@ class ImageReceiverImpl : public RosDataReceiver {
  protected:
   bool initImpl() override;
 
-  void callback(const sensor_msgs::Image::ConstPtr& color,
-                const sensor_msgs::Image::ConstPtr& depth,
+  void callback(const sensor_msgs::msg::Image::ConstSharedPtr& color,
+                const sensor_msgs::msg::Image::ConstSharedPtr& depth,
                 const SemanticMsgPtr& labels);
 
   ColorSubscriber color_sub_;
@@ -116,9 +154,9 @@ ImageReceiverImpl<SemanticT>::ImageReceiverImpl(const Config& config,
 
 template <typename SemanticT>
 bool ImageReceiverImpl<SemanticT>::initImpl() {
-  color_sub_ = ColorSubscriber(nh_);
-  depth_sub_ = DepthSubscriber(nh_);
-  semantic_sub_ = SemanticT(nh_);
+  color_sub_ = ColorSubscriber(ianvs::NodeHandle::this_node(ns_));
+  depth_sub_ = DepthSubscriber(ianvs::NodeHandle::this_node(ns_));
+  semantic_sub_ = SemanticT(ianvs::NodeHandle::this_node(ns_));
   sync_.reset(new Synchronizer(Policy(config.queue_size),
                                color_sub_.getFilter(),
                                depth_sub_.getFilter(),
@@ -128,10 +166,11 @@ bool ImageReceiverImpl<SemanticT>::initImpl() {
 }
 
 template <typename SemanticT>
-void ImageReceiverImpl<SemanticT>::callback(const sensor_msgs::Image::ConstPtr& color,
-                                            const sensor_msgs::Image::ConstPtr& depth,
-                                            const SemanticMsgPtr& labels) {
-  const auto timestamp_ns = color->header.stamp.toNSec();
+void ImageReceiverImpl<SemanticT>::callback(
+    const sensor_msgs::msg::Image::ConstSharedPtr& color,
+    const sensor_msgs::msg::Image::ConstSharedPtr& depth,
+    const SemanticMsgPtr& labels) {
+  const auto timestamp_ns = rclcpp::Time(color->header.stamp).nanoseconds();
   if (!checkInputTimestamp(timestamp_ns)) {
     return;
   }
@@ -150,6 +189,13 @@ class ClosedSetImageReceiver : public ImageReceiverImpl<LabelSubscriber> {
   virtual ~ClosedSetImageReceiver() = default;
 };
 
-void declare_config(ClosedSetImageReceiver::Config& config);
+class OpenSetImageReceiver : public ImageReceiverImpl<FeatureSubscriber> {
+ public:
+  struct Config : RosDataReceiver::Config {};
+  OpenSetImageReceiver(const Config& config, const std::string& sensor_name);
+  virtual ~OpenSetImageReceiver() = default;
+};
+
+void declare_config(OpenSetImageReceiver::Config& config);
 
 }  // namespace hydra

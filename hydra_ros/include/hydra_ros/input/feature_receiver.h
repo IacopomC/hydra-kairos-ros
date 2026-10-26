@@ -35,7 +35,7 @@
 #pragma once
 #include <config_utilities/factory.h>
 #include <hydra/common/module.h>
-#include <ros/ros.h>
+#include <ianvs/node_handle.h>
 
 #include "hydra_ros/utils/tf_lookup.h"
 
@@ -47,25 +47,25 @@ class FeatureReceiver : public Module {
  public:
   struct Config {
     //! Node handle namespace (defaults to matching data receivers)
-    std::string ns = "~input";
+    std::string ns = "~/input";
     //! Individual subscriber queue size
     size_t queue_size = 10;
     //! Lookup settings for poses
     TFLookup::Config tf_lookup;
     //! Sensors to not subscribe to
     std::vector<std::string> sensors_to_exclude;
+    //! Verbosity for receiver
+    size_t verbosity = 0;
   } const config;
 
-  FeatureReceiver(const Config& config);
+  explicit FeatureReceiver(const Config& config);
   virtual ~FeatureReceiver();
   void start() override;
   void stop() override;
-  void save(const LogSetup& setup) override;
   std::string printInfo() const override;
 
  private:
   TFLookup lookup_;
-  ros::NodeHandle nh_;
   std::vector<std::unique_ptr<FeatureSubscriber>> subs_;
 
   inline static const auto registration_ =

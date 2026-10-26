@@ -38,11 +38,12 @@
 #include <hydra/backend/backend_module.h>
 #include <hydra/common/hydra_pipeline.h>
 #include <hydra/frontend/graph_builder.h>
-#include <ros/ros.h>
+
+#include <memory>
 
 #include "hydra_ros/input/feature_receiver.h"
 #include "hydra_ros/input/ros_input_module.h"
-#include "kairos_ros/flow_temporal_ros_bridge.h"
+#include "hydra_ros/utils/status_monitor.h"
 
 namespace hydra {
 
@@ -52,23 +53,38 @@ class ExternalLoopClosureSubscriber;
 class HydraRosPipeline : public HydraPipeline {
  public:
   struct Config {
+    //! @brief Configuration for active window / metric-semantic reconstruction
     config::VirtualConfig<ActiveWindowModule> active_window{
         ReconstructionModule::Config()};
+    //! @brief Configuration for frontend module
     config::VirtualConfig<GraphBuilder> frontend{GraphBuilder::Config()};
+    //! @brief Configuration for backend module
     config::VirtualConfig<BackendModule> backend{BackendModule::Config()};
+    //! @brief Publish frontend scene graph in addition to backend
     bool enable_frontend_output = true;
-    bool enable_zmq_interface = true;
-    bool enable_flow_temporal_module = false;
+    //! @brief Turn on zmq-based publishing
+    bool enable_zmq_interface = false;
+    //! @brief Configuration for sensor inputs
     RosInputModule::Config input;
+    //! @brief Receiver for language features
     config::VirtualConfig<FeatureReceiver> features;
-    kairos::FlowTemporalRosBridge::Config flow_temporal;
+    //! @brief Verbosity setting for main pipeline class
+    int verbosity = 1;
+    //! @brief Show the config passed to Hydra (before resolving sensor configurations)
+    bool preprint_config = false;
+    //! @brief Monitor to report whether or Hydra is running normally
+    StatusMonitor::Config status_monitor;
+    //! @brief Additional modules, e.g., from external libraries loaded via `paths`
+    ModuleConfigs modules;
   } const config;
 
-  HydraRosPipeline(const ros::NodeHandle& nh, int robot_id);
+  explicit HydraRosPipeline(int robot_id, int config_verbosity = 1);
 
   virtual ~HydraRosPipeline();
 
   void init() override;
+
+  void start() override;
 
   void stop() override;
 
@@ -76,11 +92,10 @@ class HydraRosPipeline : public HydraPipeline {
   virtual void initLCD();
 
  protected:
-  ros::NodeHandle nh_;
+  std::unique_ptr<StatusMonitor> status_monitor_;
   std::shared_ptr<ActiveWindowModule> active_window_;
   std::shared_ptr<GraphBuilder> frontend_;
   std::shared_ptr<BackendModule> backend_;
-  std::shared_ptr<kairos::FlowTemporalRosBridge> flow_temporal_module_;
 
   std::unique_ptr<BowSubscriber> bow_sub_;
   std::unique_ptr<ExternalLoopClosureSubscriber> external_loop_closure_sub_;

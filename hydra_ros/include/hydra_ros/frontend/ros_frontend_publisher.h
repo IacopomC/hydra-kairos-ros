@@ -34,7 +34,12 @@
  * -------------------------------------------------------------------------- */
 #pragma once
 #include <hydra/frontend/graph_builder.h>
-#include <ros/ros.h>
+#include <pose_graph_tools_ros/conversions.h>
+
+#include <map>
+
+#include <kimera_pgmo_msgs/msg/mesh_delta.hpp>
+#include <kimera_pgmo_msgs/srv/mesh_delta_query.hpp>
 
 #include "hydra_ros/utils/dsg_streaming_interface.h"
 
@@ -42,7 +47,18 @@ namespace hydra {
 
 class RosFrontendPublisher : public GraphBuilder::Sink {
  public:
-  RosFrontendPublisher(const ros::NodeHandle& nh);
+  using MeshDeltaSrv = kimera_pgmo_msgs::srv::MeshDeltaQuery;
+  using MeshDeltaRequest = kimera_pgmo_msgs::srv::MeshDeltaQuery::Request::SharedPtr;
+  using MeshDeltaResponse = kimera_pgmo_msgs::srv::MeshDeltaQuery::Response::SharedPtr;
+  using MeshDeltaMsg = kimera_pgmo_msgs::msg::MeshDelta;
+
+  struct Config {
+    //! @brief Configuration for dsg publisher
+    DsgSender::Config dsg_sender;
+    size_t mesh_delta_queue_size = 100;  // Store mesh delta to resend. 0 for infinite
+  } const config;
+
+  explicit RosFrontendPublisher(ianvs::NodeHandle);
 
   void call(uint64_t timestamp_ns,
             const DynamicSceneGraph& graph,
@@ -51,11 +67,14 @@ class RosFrontendPublisher : public GraphBuilder::Sink {
   std::string printInfo() const override { return "RosFrontendPublisher"; }
 
  protected:
-  ros::NodeHandle nh_;
+  void processMeshDeltaQuery(const MeshDeltaRequest req, MeshDeltaResponse resp);
 
   std::unique_ptr<DsgSender> dsg_sender_;
-  ros::Publisher mesh_graph_pub_;
-  ros::Publisher mesh_update_pub_;
+  pose_graph_tools::PoseGraphPublisher mesh_graph_pub_;
+  rclcpp::Publisher<MeshDeltaMsg>::SharedPtr mesh_update_pub_;
+  rclcpp::Service<MeshDeltaSrv>::SharedPtr mesh_delta_server_;
+
+  mutable std::map<uint16_t, MeshDeltaMsg::SharedPtr> stored_delta_;
 };
 
 }  // namespace hydra

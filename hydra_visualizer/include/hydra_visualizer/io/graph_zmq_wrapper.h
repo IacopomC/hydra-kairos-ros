@@ -34,6 +34,7 @@
  * -------------------------------------------------------------------------- */
 #pragma once
 #include <config_utilities/factory.h>
+#include <ianvs/node_handle.h>
 #include <spark_dsg/zmq_interface.h>
 
 #include <atomic>
@@ -47,12 +48,13 @@ namespace hydra {
 class GraphZmqWrapper : public GraphWrapper {
  public:
   struct Config {
+    std::string frame_id;
     std::string url = "tcp://127.0.0.1:8001";
     size_t num_threads = 2;
     size_t poll_time_ms = 10;
   } const config;
 
-  explicit GraphZmqWrapper(const Config& config);
+  explicit GraphZmqWrapper(const Config& config, ianvs::NodeHandle nh);
 
   virtual ~GraphZmqWrapper();
 
@@ -71,11 +73,6 @@ class GraphZmqWrapper : public GraphWrapper {
   std::unique_ptr<std::thread> recv_thread_;
   std::unique_ptr<spark_dsg::ZmqReceiver> receiver_;
   spark_dsg::DynamicSceneGraph::Ptr graph_;
-
-  inline static const auto registration_ =
-      config::RegistrationWithConfig<GraphWrapper,
-                                     GraphZmqWrapper,
-                                     GraphZmqWrapper::Config>("GraphFromZmq");
 };
 
 void declare_config(GraphZmqWrapper::Config& config);

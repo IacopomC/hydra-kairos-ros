@@ -35,15 +35,13 @@
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
-#include <ros/ros.h>
+#include <ianvs/node_init.h>
+
+#include <rclcpp/rclcpp.hpp>
 
 auto main(int argc, char** argv) -> int {
-  ros::init(argc, argv, "test_hydra_ros");
-  ros::NodeHandle nh("~");
   int verbosity = 0;
-  nh.getParam("verbosity", verbosity);
   int minloglevel = 1;
-  nh.getParam("minloglevel", minloglevel);
 
   FLAGS_logtostderr = true;
   FLAGS_alsologtostderr = true;
@@ -53,5 +51,13 @@ auto main(int argc, char** argv) -> int {
 
   ::testing::InitGoogleTest(&argc, argv);
   google::InitGoogleLogging(argv[0]);
-  return RUN_ALL_TESTS();
+
+  int ret;
+  {  // Start node scope
+    const auto node = ianvs::init_node(argc, argv, "hydra_ros_tests");
+    ret = RUN_ALL_TESTS();
+    rclcpp::shutdown();
+  }  // End node scope
+
+  return ret;
 }

@@ -34,17 +34,25 @@
  * -------------------------------------------------------------------------- */
 #include "hydra_ros/utils/input_data_to_messages.h"
 
-#include <cv_bridge/cv_bridge.h>
+#include <config_utilities/config.h>
 #include <hydra/input/input_data.h>
 
+#include <cv_bridge/cv_bridge.hpp>
+#include <sensor_msgs/msg/point_field.hpp>
+
 namespace hydra {
+
+using sensor_msgs::msg::Image;
+using sensor_msgs::msg::PointCloud2;
+using sensor_msgs::msg::PointField;
+
 namespace {
 
-sensor_msgs::PointField makeField(const std::string& name,
-                                  uint32_t offset,
-                                  uint8_t datatype,
-                                  uint32_t count = 1) {
-  sensor_msgs::PointField field;
+PointField makeField(const std::string& name,
+                     uint32_t offset,
+                     uint8_t datatype,
+                     uint32_t count = 1) {
+  PointField field;
   field.name = name;
   field.offset = offset;
   field.datatype = datatype;
@@ -52,21 +60,42 @@ sensor_msgs::PointField makeField(const std::string& name,
   return field;
 }
 
+cv::Mat showImage(const cv::Mat& input, const DisplayConfig& config) {
+  if (config.width_scale == 1.0f && config.height_scale == 1.0f) {
+    return input;
+  }
+
+  cv::Mat output;
+  cv::resize(input,
+             output,
+             cv::Size(),
+             config.width_scale,
+             config.height_scale,
+             cv::INTER_NEAREST);
+  return output;
+}
+
 }  // namespace
 
-using LabelColormap = std::function<spark_dsg::Color(uint32_t)>;
+void declare_config(DisplayConfig& config) {
+  using namespace config;
+  name("DisplayConfig");
+  field(config.width_scale, "width_scale");
+  field(config.height_scale, "height_scale");
+}
 
-sensor_msgs::Image::Ptr makeImage(const std_msgs::Header& header,
-                                  const InputData& sensor_data,
-                                  const LabelColormap& colormap) {
+Image::SharedPtr makeImage(const std_msgs::msg::Header& header,
+                           const InputData& sensor_data,
+                           const CmapFunc& colormap,
+                           const DisplayConfig& config) {
   const auto& labels = sensor_data.label_image;
   cv_bridge::CvImagePtr msg(new cv_bridge::CvImage());
   msg->header = header;
   msg->encoding = "rgb8";
-  msg->image = cv::Mat(labels.rows, labels.cols, CV_8UC3);
+  cv::Mat img(labels.rows, labels.cols, CV_8UC3);
   for (int r = 0; r < labels.rows; ++r) {
     for (int c = 0; c < labels.cols; ++c) {
-      auto pixel = msg->image.ptr<uint8_t>(r, c);
+      auto pixel = img.ptr<uint8_t>(r, c);
       const auto color = colormap(labels.at<int>(r, c));
       *pixel = color.r;
       *(pixel + 1) = color.g;
@@ -74,14 +103,35 @@ sensor_msgs::Image::Ptr makeImage(const std_msgs::Header& header,
     }
   }
 
+  msg->image = showImage(img, config);
+  return msg->toImageMsg();
+}
+
+Image::SharedPtr makeDepthImage(const std_msgs::msg::Header& header,
+                                const InputData& sensor_data,
+                                const DisplayConfig& config) {
+  cv_bridge::CvImagePtr msg(new cv_bridge::CvImage());
+  msg->header = header;
+  msg->encoding = "32FC1";
+  msg->image = showImage(sensor_data.depth_image, config);
+  return msg->toImageMsg();
+}
+
+Image::SharedPtr makeRangeImage(const std_msgs::msg::Header& header,
+                                const InputData& sensor_data,
+                                const DisplayConfig& config) {
+  cv_bridge::CvImagePtr msg(new cv_bridge::CvImage());
+  msg->header = header;
+  msg->encoding = "32FC1";
+  msg->image = showImage(sensor_data.range_image, config);
   return msg->toImageMsg();
 }
 
 // TODO(nathan) pcl_ros would avoid this but it causes compile issues (and would also
 // require going to pcl pointcloud as an intermediate type)
-sensor_msgs::PointCloud2::Ptr makeCloud(const std_msgs::Header& header,
-                                        const InputData& sensor_data,
-                                        bool filter_by_range) {
+PointCloud2::UniquePtr makeCloud(const std_msgs::msg::Header& header,
+                                 const InputData& sensor_data,
+                                 bool filter_by_range) {
   const auto& sensor = sensor_data.getSensor();
   const auto& labels = sensor_data.label_image;
   const auto& points = sensor_data.vertex_map;
@@ -90,25 +140,25 @@ sensor_msgs::PointCloud2::Ptr makeCloud(const std_msgs::Header& header,
   const auto has_color = !colors.empty();
   const auto has_labels = !labels.empty();
 
-  sensor_msgs::PointCloud2::Ptr cloud(new sensor_msgs::PointCloud2());
+  auto cloud = std::make_unique<PointCloud2>();
   cloud->header = header;
   cloud->height = points.rows;
   cloud->width = points.cols;
 
   auto& step = cloud->point_step;
-  cloud->fields.push_back(makeField("x", step, sensor_msgs::PointField::FLOAT32));
+  cloud->fields.push_back(makeField("x", step, PointField::FLOAT32));
   step += sizeof(float);
-  cloud->fields.push_back(makeField("y", step, sensor_msgs::PointField::FLOAT32));
+  cloud->fields.push_back(makeField("y", step, PointField::FLOAT32));
   step += sizeof(float);
-  cloud->fields.push_back(makeField("z", step, sensor_msgs::PointField::FLOAT32));
+  cloud->fields.push_back(makeField("z", step, PointField::FLOAT32));
   step += sizeof(float);
   if (has_color) {
-    cloud->fields.push_back(makeField("rgba", step, sensor_msgs::PointField::UINT32));
+    cloud->fields.push_back(makeField("rgba", step, PointField::UINT32));
     step += sizeof(uint32_t);
   }
 
   if (has_labels) {
-    cloud->fields.push_back(makeField("label", step, sensor_msgs::PointField::UINT32));
+    cloud->fields.push_back(makeField("label", step, PointField::UINT32));
     step += sizeof(uint32_t);
   }
 

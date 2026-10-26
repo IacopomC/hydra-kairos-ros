@@ -35,384 +35,271 @@
 #include "hydra_visualizer/scene_graph_renderer.h"
 
 #include <config_utilities/config.h>
-#include <config_utilities/parsing/ros.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
 #include <spark_dsg/node_attributes.h>
-#include <std_msgs/String.h>
-#include <tf2_eigen/tf2_eigen.h>
+#include <spark_dsg/printing.h>
+
+#include <std_msgs/msg/string.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 #include "hydra_visualizer/color/colormap_utilities.h"
-#include "hydra_visualizer/utils/config_manager.h"
-#include "hydra_visualizer/utils/visualizer_utilities.h"
+#include "hydra_visualizer/drawing.h"
 
 namespace hydra {
 
 using namespace spark_dsg;
 using namespace visualizer;
 
-using visualization_msgs::Marker;
-using visualization_msgs::MarkerArray;
+using visualization_msgs::msg::Marker;
+using visualization_msgs::msg::MarkerArray;
 
 namespace {
 
-constexpr float kFlowColorR = 1.00f;
-constexpr float kFlowColorG = 0.00f;
-constexpr float kFlowColorB = 0.00f;
-
-double readDouble(const nlohmann::json& metadata,
-                  const std::string& key,
-                  double fallback = 0.0) {
-  if (!metadata.is_object()) {
-    return fallback;
+inline std::string keyToLayerName(LayerKey key) {
+  std::stringstream ss;
+  ss << "layer_" << key.layer;
+  if (key.partition) {
+    ss << "p" << key.partition;
   }
 
-  const auto iter = metadata.find(key);
-  if (iter == metadata.end() || !iter->is_number()) {
-    return fallback;
-  }
-
-  return iter->get<double>();
+  return ss.str();
 }
 
-bool readBool(const nlohmann::json& metadata,
-              const std::string& key,
-              bool fallback = false) {
-  if (!metadata.is_object()) {
-    return fallback;
-  }
+inline Marker makeNewEdgeList(const std_msgs::msg::Header& header,
+                              const std::string& ns_prefix,
+                              LayerKey source,
+                              LayerKey target) {
+  Marker marker;
+  marker.header = header;
+  marker.type = Marker::LINE_LIST;
+  marker.action = Marker::ADD;
+  marker.id = 0;
 
-  const auto iter = metadata.find(key);
-  if (iter == metadata.end() || !iter->is_boolean()) {
-    return fallback;
-  }
-
-  return iter->get<bool>();
-}
-
-bool hasFlowDynamics(const nlohmann::json& metadata) {
-  if (!metadata.is_object()) {
-    return false;
-  }
-
-  const auto iter = metadata.find("flow_num_components");
-  if (iter == metadata.end() || !iter->is_number()) {
-    return false;
-  }
-
-  return iter->get<double>() > 0.0;
-}
-
-MarkerArray makeFlowArrowMarkers(const std_msgs::Header& header,
-                                 const visualizer::StaticLayerInfo& info,
-                                 const spark_dsg::SceneGraphLayer& layer,
-                                 const std::string& ns) {
-  MarkerArray msg;
-
-  int marker_id = 0;
-  for (const auto& [node_id, node] : layer.nodes()) {
-    if (info.filter && !info.filter(*node)) {
-      continue;
-    }
-
-    const auto& attrs = node->attributes();
-    const auto& metadata = attrs.metadata;
-    if (!metadata.is_object() || !metadata.contains("flow_components") ||
-        !metadata.at("flow_components").is_array()) {
-      continue;
-    }
-
-    const double confidence = std::clamp(readDouble(metadata, "flow_confidence", 1.0), 0.0, 1.0);
-    const bool show_dominant_overlay = readBool(metadata, "flow_use_fixed_components", false);
-    bool emitted_component_arrow = false;
-
-    for (const auto& component : metadata.at("flow_components")) {
-      if (!component.is_object()) {
-        continue;
-      }
-
-      if (!component.contains("theta") || !component.contains("rho") ||
-          !component.contains("weight") || !component.at("theta").is_number() ||
-          !component.at("rho").is_number() || !component.at("weight").is_number()) {
-        continue;
-      }
-
-      const double theta = component.at("theta").get<double>();
-      const double rho = std::max(0.0, component.at("rho").get<double>());
-      const double weight = std::clamp(component.at("weight").get<double>(), 0.0, 1.0);
-
-      const double length = std::clamp(0.8 * rho * (0.25 + 0.75 * weight), 0.05, 2.0);
-      if (length <= 0.0) {
-        continue;
-      }
-
-      Marker marker;
-      marker.header = header;
-      marker.ns = ns;
-      marker.id = marker_id++;
-      marker.type = Marker::ARROW;
-      marker.action = Marker::ADD;
-      marker.pose.orientation.w = 1.0;
-
-      marker.scale.x = 0.025 + 0.08 * weight;
-      marker.scale.y = 0.06 + 0.18 * weight;
-      marker.scale.z = 0.08 + 0.20 * weight;
-
-      geometry_msgs::Point start;
-      start.x = attrs.position.x();
-      start.y = attrs.position.y();
-      start.z = attrs.position.z() + info.getZOffset();
-      marker.points.push_back(start);
-
-      geometry_msgs::Point end;
-      end.x = attrs.position.x() + length * std::cos(theta);
-      end.y = attrs.position.y() + length * std::sin(theta);
-      end.z = attrs.position.z() + info.getZOffset();
-      marker.points.push_back(end);
-
-      marker.color.r = kFlowColorR;
-      marker.color.g = kFlowColorG;
-      marker.color.b = kFlowColorB;
-      marker.color.a = static_cast<float>(std::max(0.40, confidence * std::max(weight, 0.35)));
-
-      msg.markers.push_back(marker);
-      emitted_component_arrow = true;
-    }
-
-    if (!show_dominant_overlay) {
-      continue;
-    }
-
-    const double dominant_theta = readDouble(metadata, "flow_dominant_theta", 0.0);
-    const double dominant_rho = std::max(0.0, readDouble(metadata, "flow_dominant_rho", 0.0));
-    const double dominant_length = std::clamp(0.8 * dominant_rho, 0.25, 2.0);
-    if (dominant_length > 0.0) {
-      Marker dominant_marker;
-      dominant_marker.header = header;
-      dominant_marker.ns = ns;
-      dominant_marker.id = marker_id++;
-      dominant_marker.type = Marker::ARROW;
-      dominant_marker.action = Marker::ADD;
-      dominant_marker.pose.orientation.w = 1.0;
-
-      dominant_marker.scale.x = 0.055;
-      dominant_marker.scale.y = 0.120;
-      dominant_marker.scale.z = 0.160;
-
-      const double z_offset = info.getZOffset() + (emitted_component_arrow ? 0.10 : 0.0);
-
-      geometry_msgs::Point start;
-      start.x = attrs.position.x();
-      start.y = attrs.position.y();
-      start.z = attrs.position.z() + z_offset;
-      dominant_marker.points.push_back(start);
-
-      geometry_msgs::Point end;
-      end.x = attrs.position.x() + dominant_length * std::cos(dominant_theta);
-      end.y = attrs.position.y() + dominant_length * std::sin(dominant_theta);
-      end.z = attrs.position.z() + z_offset;
-      dominant_marker.points.push_back(end);
-
-      dominant_marker.color.r = kFlowColorR;
-      dominant_marker.color.g = kFlowColorG;
-      dominant_marker.color.b = kFlowColorB;
-      dominant_marker.color.a = static_cast<float>(std::max(0.55, confidence));
-
-      msg.markers.push_back(dominant_marker);
-    }
-  }
-
-  return msg;
+  std::stringstream ss;
+  ss << ns_prefix << source << "_" << target;
+  marker.ns = ss.str();
+  return marker;
 }
 
 }  // namespace
 
 struct MarkerNamespaces {
-  static std::string layerNodeNamespace(spark_dsg::LayerId layer) {
-    return std::string("layer_nodes_") + std::to_string(layer);
+  static std::string layerNodeNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_nodes";
   }
 
-  static std::string layerEdgeNamespace(spark_dsg::LayerId layer) {
-    return std::string("layer_edges_") + std::to_string(layer);
+  static std::string layerEdgeNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_edges";
   }
 
-  static std::string layerLabelNamespace(spark_dsg::LayerId layer) {
-    return std::string("layer_labels_") + std::to_string(layer);
+  static std::string layerTextNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_text";
   }
 
-  static std::string layerBboxNamespace(spark_dsg::LayerId layer) {
-    return std::string("layer_bounding_boxes_") + std::to_string(layer);
+  static std::string layerBboxNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_bounding_boxes";
   }
 
-  static std::string layerBoundaryNamespace(spark_dsg::LayerId layer) {
-    return std::string("layer_polygon_boundaries_") + std::to_string(layer);
+  static std::string layerBoundaryNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_polygon_boundaries";
   }
 
-  static std::string layerBoundaryEllipseNamespace(spark_dsg::LayerId layer) {
-    return std::string("layer_ellipsoid_boundaries_") + std::to_string(layer);
+  static std::string layerBoundaryEllipseNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_ellipsoid_boundaries";
   }
 
-  static std::string layerBoundaryEdgeNamespace(spark_dsg::LayerId layer) {
-    return std::string("layer_polygon_boundaries_edges_") + std::to_string(layer);
+  static std::string layerBoundaryEdgeNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_polygon_boundaries_edges";
   }
 
-  static std::string meshEdgeNamespace(spark_dsg::LayerId layer) {
-    return std::string("mesh_edges_") + std::to_string(layer);
-  }
-
-  static std::string dynamicNodeNamespace(char layer_prefix) {
-    return std::string("dynamic_nodes_") + layer_prefix;
-  }
-
-  static std::string dynamicEdgeNamespace(char layer_prefix) {
-    return std::string("dynamic_edges_") + layer_prefix;
-  }
-
-  static std::string dynamicLabelNamespace(char layer_prefix) {
-    return std::string("dynamic_label_") + layer_prefix;
+  static std::string meshEdgeNamespace(LayerKey key) {
+    return keyToLayerName(key) + "_mesh_edges";
   }
 };
 
-SceneGraphRenderer::SceneGraphRenderer(const ros::NodeHandle& nh)
-    : nh_(nh), pub_(nh_.advertise<MarkerArray>("dsg_markers", 1, true)) {
-  ConfigManager::init(nh_);
+void declare_config(GraphRenderConfig& config) {
+  using namespace config;
+  name("GraphRenderConfig");
+  field(config.layer_z_step, "layer_z_step");
+  field(config.collapse_layers, "collapse_layers");
 }
 
-void SceneGraphRenderer::reset(const std_msgs::Header& header) {
+void declare_config(SceneGraphRenderer::Config& config) {
+  using namespace config;
+  name("SceneGraphRenderer::Config");
+  field(config.graph, "graph");
+  field(config.layers, "layers");
+  field(config.partitions, "partitions");
+}
+
+SceneGraphRenderer::SceneGraphRenderer(const Config& config, ianvs::NodeHandle nh)
+    : nh_(nh),
+      graph_config_("renderer", config.graph, [this]() { has_change_ = true; }),
+      pub_(nh.create_publisher<MarkerArray>("graph", rclcpp::QoS(1).transient_local())),
+      has_change_(false) {
+  // init wrappers from parsed initial config
+  for (const auto& [layer_id, layer_config] : config.layers) {
+    const auto ns = "renderer/config/layer" + std::to_string(layer_id);
+    layers_.emplace(layer_id,
+                    std::make_unique<LayerConfigWrapper>(
+                        ns, layer_config, [this]() { has_change_ = true; }));
+  }
+
+  for (const auto& [layer_id, layer_config] : config.partitions) {
+    const auto ns = "renderer/config/partitions/layer" + std::to_string(layer_id);
+    partitions_.emplace(layer_id,
+                        std::make_unique<LayerConfigWrapper>(
+                            ns, layer_config, [this]() { has_change_ = true; }));
+  }
+}
+
+void SceneGraphRenderer::reset(const std_msgs::msg::Header& header) {
   MarkerArray msg;
   tracker_.clearPrevious(header, msg);
   if (!msg.markers.empty()) {
-    pub_.publish(msg);
+    pub_->publish(msg);
   }
-
-  // TODO(nathan) think if we actually want to do this
-  // ConfigManager::reset();
 }
 
-bool SceneGraphRenderer::hasChange() const {
-  return ConfigManager::instance().hasChange();
-}
+bool SceneGraphRenderer::hasChange() const { return has_change_; }
 
-void SceneGraphRenderer::clearChangeFlag() {
-  ConfigManager::instance().clearChangeFlags();
-}
+void SceneGraphRenderer::clearChangeFlag() { has_change_ = false; }
 
-void SceneGraphRenderer::draw(const std_msgs::Header& header,
-                              const DynamicSceneGraph& graph) {
-  visualizer::GraphInfo info;
-  const auto& manager = ConfigManager::instance();
+void SceneGraphRenderer::draw(const std_msgs::msg::Header& header,
+                              const DynamicSceneGraph& graph) const {
+  setConfigs(graph);
 
   MarkerArray msg;
-  for (auto&& [layer_id, layer] : graph.layers()) {
-    const auto& conf = manager.getLayerConfig(layer_id);
-    auto iter = info.layers.emplace(layer_id, conf.getInfo(graph)).first;
-    drawLayer(header, iter->second, *layer, msg);
-    if (iter->second.layer.visualize && iter->second.layer.draw_mesh_edges) {
-      const std::string ns = MarkerNamespaces::meshEdgeNamespace(layer_id);
-      tracker_.add(makeMeshEdgesMarker(header, iter->second, graph, *layer, ns), msg);
+  for (const auto& [layer_id, layer] : graph.layers()) {
+    drawLayer(header, layer_infos_.at(layer_id), *layer, graph.mesh().get(), msg);
+  }
+
+  for (const auto& [l_id, partitions] : graph.layer_partitions()) {
+    for (const auto& [partition_id, partition] : partitions) {
+      drawLayer(header, partition_infos_.at(l_id), *partition, graph.mesh().get(), msg);
     }
   }
 
-  for (auto&& [layer_id, sublayers] : graph.dynamicLayers()) {
-    const auto& conf = manager.getDynamicLayerConfig(layer_id);
-    auto iter = info.dynamic_layers.emplace(layer_id, conf.getInfo(graph)).first;
-    for (auto&& [prefix, layer] : sublayers) {
-      drawDynamicLayer(header, iter->second, *layer, msg);
-    }
-  }
-
-  const auto static_edges = makeGraphEdgeMarkers(
-      header, info, graph, graph.interlayer_edges(), "interlayer_edges_");
-  tracker_.add(static_edges, msg);
-
-  const auto dynamic_edges = makeGraphEdgeMarkers(header,
-                                                  info,
-                                                  graph,
-                                                  graph.dynamic_interlayer_edges(),
-                                                  "dynamic_interlayer_edges_");
-  tracker_.add(dynamic_edges, msg);
+  MarkerArray edges;
+  drawInterlayerEdges(header, graph, edges);
+  tracker_.add(edges, msg);
 
   tracker_.clearPrevious(header, msg);
   if (!msg.markers.empty()) {
-    pub_.publish(msg);
+    pub_->publish(msg);
   }
 }
 
-void SceneGraphRenderer::drawLayer(const std_msgs::Header& header,
-                                   const StaticLayerInfo& info,
+void SceneGraphRenderer::drawInterlayerEdges(const std_msgs::msg::Header& header,
+                                             const DynamicSceneGraph& graph,
+                                             MarkerArray& msg) const {
+  const std::string ns_prefix = "interlayer_edges_";
+  std::map<LayerKey, size_t> marker_indices;
+  std::map<LayerKey, size_t> num_since_last;
+  for (const auto& [key, edge] : graph.interlayer_edges()) {
+    const auto& source = graph.getNode(edge.source);
+    const auto& source_info = getLayerInfo(source.layer);
+    const auto& target = graph.getNode(edge.target);
+    const auto& target_info = getLayerInfo(target.layer);
+    if (!source_info.shouldVisualize(source) || !target_info.shouldVisualize(target)) {
+      continue;
+    }
+
+    if (!source_info.config.edges.draw_interlayer ||
+        !target_info.config.edges.draw_interlayer) {
+      continue;
+    }
+
+    const auto use_source = source_info.config.edges.interlayer_use_source;
+    const auto& info = use_source ? source_info : target_info;
+
+    auto iter = marker_indices.find(source.layer);
+    if (iter == marker_indices.end()) {
+      iter = marker_indices.emplace(source.layer, msg.markers.size()).first;
+      msg.markers.push_back(
+          makeNewEdgeList(header, ns_prefix, source.layer, target.layer));
+      msg.markers.back().scale.x = info.config.edges.interlayer_scale;
+      // make sure we always draw at least one edge
+      num_since_last[source.layer] = info.config.edges.interlayer_insertion_skip;
+    }
+
+    if (num_since_last[source.layer] >= info.config.edges.interlayer_insertion_skip) {
+      num_since_last[source.layer] = 0;
+    } else {
+      num_since_last[source.layer]++;
+      continue;
+    }
+
+    auto& marker = msg.markers.at(iter->second);
+    geometry_msgs::msg::Point source_point;
+    tf2::convert(source.attributes().position, source_point);
+    source_point.z += source_info.z_offset;
+    marker.points.push_back(source_point);
+
+    geometry_msgs::msg::Point target_point;
+    tf2::convert(target.attributes().position, target_point);
+    target_point.z += target_info.z_offset;
+    marker.points.push_back(target_point);
+
+    const auto color = makeColorMsg(info.node_color(use_source ? source : target),
+                                    info.config.edges.interlayer_alpha);
+    marker.colors.push_back(color);
+    marker.colors.push_back(color);
+  }
+}
+
+void SceneGraphRenderer::drawLayer(const std_msgs::msg::Header& header,
+                                   const LayerInfo& info,
                                    const SceneGraphLayer& layer,
-                                   MarkerArray& msg) {
-  if (!info.layer.visualize) {
+                                   const Mesh* mesh,
+                                   MarkerArray& msg) const {
+  if (!info.config.visualize) {
     return;
   }
 
-  if (info.layer.draw_frontier_ellipse) {
+  if (info.config.draw_frontier_ellipse) {
     info.filter = [](const SceneGraphNode& node) {
-      try {
-        return node.attributes<PlaceNodeAttributes>().real_place;
-      } catch (const std::bad_cast&) {
-        return true;
-      }
+      auto attrs = node.tryAttributes<PlaceNodeAttributes>();
+      return attrs ? attrs->real_place : true;
     };
   }
 
   const auto node_ns = MarkerNamespaces::layerNodeNamespace(layer.id);
-  if (layer.id != spark_dsg::DsgLayers::MESH_PLACES) {
-    tracker_.add(makeLayerNodeMarkers(header, info, layer, node_ns), msg);
-  } else {
-    auto node_info = info;
-    const auto base_filter = node_info.filter;
-    node_info.filter = [base_filter](const SceneGraphNode& node) {
-      if (base_filter && !base_filter(node)) {
-        return false;
-      }
+  tracker_.add(makeLayerNodeMarkers(header, info, layer, node_ns), msg);
 
-      return !hasFlowDynamics(node.attributes().metadata);
-    };
-
-    tracker_.add(makeLayerNodeMarkers(header, node_info, layer, node_ns), msg);
-  }
-
-  if (info.layer.use_label) {
-    const auto ns = MarkerNamespaces::layerLabelNamespace(layer.id);
-    tracker_.add(makeLayerLabelMarkers(header, info, layer, ns), msg);
-  }
-
-  if (info.layer.use_bounding_box) {
-    const auto ns = MarkerNamespaces::layerBboxNamespace(layer.id);
-    try {
-      tracker_.add(makeLayerBoundingBoxes(header, info, layer, ns), msg);
-    } catch (const std::bad_cast& e) {
-      LOG_FIRST_N(WARNING, 5) << "unable to draw bounding boxes for layer " << layer.id
-                              << ": " << e.what();
+  if (info.config.text.draw) {
+    if (info.config.text.draw_layer) {
+      LOG_FIRST_N(WARNING, 5) << "use_text and use_layer_text are mutually exclusive!";
     }
+
+    const auto ns = MarkerNamespaces::layerTextNamespace(layer.id);
+    tracker_.add(makeLayerNodeTextMarkers(header, info, layer, ns), msg);
+  } else if (info.config.text.draw_layer && !layer.nodes().empty()) {
+    const auto ns = MarkerNamespaces::layerTextNamespace(layer.id);
+    tracker_.add(makeLayerTextMarker(header, info, layer, ns), msg);
   }
 
-  if (info.layer.draw_boundaries) {
+  if (info.config.bounding_boxes.draw) {
+    const auto ns = MarkerNamespaces::layerBboxNamespace(layer.id);
+    tracker_.add(makeLayerBoundingBoxes(header, info, layer, ns), msg);
+  }
+
+  if (info.config.boundaries.draw) {
     const auto ns = MarkerNamespaces::layerBoundaryNamespace(layer.id);
     const auto edge_ns = MarkerNamespaces::layerBoundaryEdgeNamespace(layer.id);
-    try {
-      tracker_.add(makeLayerPolygonBoundaries(header, info, layer, ns), msg);
-      if (info.layer.collapse_boundary) {
-        tracker_.add(makeLayerPolygonEdges(header, info, layer, edge_ns), msg);
-      }
-    } catch (const std::bad_cast& e) {
-      LOG_FIRST_N(WARNING, 5) << "Could not draw boundaries for layer " << layer.id
-                              << ": " << e.what();
+    tracker_.add(makeLayerPolygonBoundaries(header, info, layer, ns), msg);
+    if (info.config.boundaries.collapse) {
+      tracker_.add(makeLayerPolygonEdges(header, info, layer, edge_ns), msg);
     }
   }
 
-  if (info.layer.draw_boundary_ellipse) {
+  if (info.config.boundaries.draw_ellipse) {
     const auto ns = MarkerNamespaces::layerBoundaryEllipseNamespace(layer.id);
-    try {
-      tracker_.add(makeLayerEllipseBoundaries(header, info, layer, ns), msg);
-    } catch (const std::bad_cast& e) {
-      LOG_FIRST_N(WARNING, 5) << "Could not draw boundary ellipses for layer "
-                              << layer.id << ": " << e.what();
-    }
+    tracker_.add(makeLayerEllipseBoundaries(header, info, layer, ns), msg);
   }
 
-  if (info.layer.draw_frontier_ellipse) {
+  if (info.config.draw_frontier_ellipse) {
     tracker_.add(makeEllipsoidMarkers(header, info, layer, "frontier_ns"), msg);
     info.filter = {};  // we reset the manual filter to draw edges to frontiers
   }
@@ -420,28 +307,54 @@ void SceneGraphRenderer::drawLayer(const std_msgs::Header& header,
   const auto edge_ns = MarkerNamespaces::layerEdgeNamespace(layer.id);
   tracker_.add(makeLayerEdgeMarkers(header, info, layer, edge_ns), msg);
 
-  if (layer.id == spark_dsg::DsgLayers::MESH_PLACES) {
-    const auto ns = std::string("layer_flow_arrows_") + std::to_string(layer.id);
-    tracker_.add(makeFlowArrowMarkers(header, info, layer, ns), msg);
+  if (mesh && info.config.draw_mesh_edges) {
+    const std::string ns = MarkerNamespaces::meshEdgeNamespace(layer.id);
+    tracker_.add(makeMeshEdgesMarker(header, info, layer, *mesh, ns), msg);
   }
 }
 
-void SceneGraphRenderer::drawDynamicLayer(const std_msgs::Header& header,
-                                          const DynamicLayerInfo& info,
-                                          const DynamicSceneGraphLayer& layer,
-                                          MarkerArray& msg) {
-  if (!info.layer.visualize) {
-    return;
+void SceneGraphRenderer::setConfigs(const DynamicSceneGraph& graph) const {
+  layer_infos_.clear();
+  partition_infos_.clear();
+
+  const auto& graph_config = graph_config_.get();
+  for (const auto& [layer_id, layer] : graph.layers()) {
+    auto iter = layers_.find(layer_id);
+    if (iter == layers_.end()) {
+      // TODO(nathan) think about logging
+      const auto ns = "renderer/config/layer" + std::to_string(layer_id);
+      iter = layers_.emplace(layer_id, std::make_unique<LayerConfigWrapper>(ns)).first;
+      iter->second->setCallback([this]() { has_change_ = true; });
+    }
+
+    // TODO(nathan) this is ugly because layer info doesn't have a copy constructor
+    layer_infos_.emplace(layer_id, LayerInfo(iter->second->get()))
+        .first->second.offset(graph_config.layer_z_step, graph_config.collapse_layers)
+        .graph(graph, layer_id);
   }
 
-  const auto node_ns = MarkerNamespaces::dynamicNodeNamespace(layer.prefix);
-  tracker_.add(makeDynamicNodeMarkers(header, info, layer, node_ns), msg);
+  for (const auto& [l_id, partitions] : graph.layer_partitions()) {
+    auto iter = partitions_.find(l_id);
+    if (iter == partitions_.end()) {
+      // TODO(nathan) think about logging
+      const auto ns = "renderer/config/partitions/layer" + std::to_string(l_id);
+      iter = partitions_.emplace(l_id, std::make_unique<LayerConfigWrapper>(ns)).first;
+      iter->second->setCallback([this]() { has_change_ = true; });
+    }
 
-  const auto edge_ns = MarkerNamespaces::dynamicEdgeNamespace(layer.prefix);
-  tracker_.add(makeDynamicEdgeMarkers(header, info, layer, edge_ns), msg);
+    // TODO(nathan) this is ugly because layer info doesn't have a copy constructor
+    partition_infos_.emplace(l_id, LayerInfo(iter->second->get()))
+        .first->second.offset(graph_config.layer_z_step, graph_config.collapse_layers)
+        .graph(graph, l_id);
+  }
+}
 
-  const auto label_ns = MarkerNamespaces::dynamicLabelNamespace(layer.prefix);
-  tracker_.add(makeDynamicLabelMarker(header, info, layer, label_ns), msg);
+const LayerInfo& SceneGraphRenderer::getLayerInfo(LayerKey layer) const {
+  if (!layer.partition) {
+    return layer_infos_.at(layer.layer);
+  } else {
+    return partition_infos_.at(layer.layer);
+  }
 }
 
 }  // namespace hydra

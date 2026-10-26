@@ -35,35 +35,34 @@
 #include "hydra_visualizer/plugins/footprint_plugin.h"
 
 #include <config_utilities/config.h>
+#include <config_utilities/factory.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
 #include <spark_dsg/node_attributes.h>
-#include <tf2_eigen/tf2_eigen.h>
+
+#include <tf2_eigen/tf2_eigen.hpp>
 
 #include "hydra_visualizer/color/colormap_utilities.h"
 #include "hydra_visualizer/utils/polygon_utilities.h"
 
 namespace hydra {
+namespace {
+
+static const auto registration_ =
+    config::RegistrationWithConfig<VisualizerPlugin,
+                                   FootprintPlugin,
+                                   FootprintPlugin::Config,
+                                   ianvs::NodeHandle,
+                                   std::string>("FootprintPlugin");
+}
 
 using spark_dsg::DsgLayers;
 using spark_dsg::DynamicSceneGraph;
 using spark_dsg::LayerId;
 using spark_dsg::PlaceNodeAttributes;
 using spark_dsg::SemanticNodeAttributes;
-using visualization_msgs::Marker;
-using visualization_msgs::MarkerArray;
-
-struct LayerIdConversion {
-  static std::string toIntermediate(const LayerId& layer_id, std::string&) {
-    return DsgLayers::LayerIdToString(layer_id);
-  }
-
-  static void fromIntermediate(const std::string& layer_name,
-                               LayerId& layer_id,
-                               std::string&) {
-    layer_id = DsgLayers::StringToLayerId(layer_name);
-  }
-};
+using visualization_msgs::msg::Marker;
+using visualization_msgs::msg::MarkerArray;
 
 void declare_config(FootprintPlugin::Config& config) {
   using namespace config;
@@ -76,29 +75,26 @@ void declare_config(FootprintPlugin::Config& config) {
   field(config.mesh_alpha, "mesh_alpha");
   field(config.footprint_radius, "footprint_radius");
   field(config.num_samples, "num_samples");
-  field<LayerIdConversion>(config.layer_id, "layer_id");
+  field(config.layer, "layer");
 
   check(config.line_width, GT, 0.0, "line_width");
   check(config.line_alpha, GT, 0.0, "line_alpha");
 }
 
 FootprintPlugin::FootprintPlugin(const Config& config,
-                                 const ros::NodeHandle& nh,
+                                 ianvs::NodeHandle nh,
                                  const std::string& name)
-    : VisualizerPlugin(nh, name), config(config::checkValid(config)) {
-  // namespacing gives us a reasonable topic
-  pub_ = nh_.advertise<MarkerArray>("", 1, true);
-}
+    : VisualizerPlugin(name),
+      config(config::checkValid(config)),
+      pub_(nh.create_publisher<MarkerArray>(name, rclcpp::QoS(1).transient_local())) {}
 
-FootprintPlugin::~FootprintPlugin() {}
-
-void FootprintPlugin::draw(const std_msgs::Header& header,
+void FootprintPlugin::draw(const std_msgs::msg::Header& header,
                            const DynamicSceneGraph& graph) {
   MarkerArray markers;
   markers.markers.resize(
       config.draw_boundaries ? (config.draw_boundary_vertices ? 3 : 2) : 1);
 
-  std::string ns = "layer_" + std::to_string(config.layer_id) + "_footprints";
+  std::string ns = config.layer + "_footprints";
   markers.markers[0].header = header;
   markers.markers[0].ns = ns + "_polygons";
   markers.markers[0].id = 0;
@@ -134,7 +130,7 @@ void FootprintPlugin::draw(const std_msgs::Header& header,
     }
   }
 
-  const auto& layer = graph.getLayer(config.layer_id);
+  const auto& layer = graph.getLayer(config.layer);
   for (auto&& [id, node] : layer.nodes()) {
     const auto mean_z = getMeanNeighborHeight(layer, *node);
     const auto& attrs = node->attributes<SemanticNodeAttributes>();
@@ -166,15 +162,15 @@ void FootprintPlugin::draw(const std_msgs::Header& header,
   tracker_.add(markers, msg);
   tracker_.clearPrevious(header, msg);
   if (!msg.markers.empty()) {
-    pub_.publish(msg);
+    pub_->publish(msg);
   }
 }
 
-void FootprintPlugin::reset(const std_msgs::Header& header) {
+void FootprintPlugin::reset(const std_msgs::msg::Header& header) {
   MarkerArray msg;
   tracker_.clearPrevious(header, msg);
   if (!msg.markers.empty()) {
-    pub_.publish(msg);
+    pub_->publish(msg);
   }
 }
 

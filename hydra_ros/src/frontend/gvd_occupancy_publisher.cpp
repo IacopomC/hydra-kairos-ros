@@ -62,7 +62,8 @@ void declare_config(GvdOccupancyPublisher::Config& config) {
 }
 
 GvdOccupancyPublisher::GvdOccupancyPublisher(const Config& config)
-    : OccupancyPublisher<places::GvdBlock>(config, ros::NodeHandle(config.ns)),
+    : OccupancyPublisher<places::GvdBlock>(config,
+                                           ianvs::NodeHandle::this_node(config.ns)),
       config(config::checkValid(config)) {}
 
 std::string GvdOccupancyPublisher::printInfo() const {
@@ -70,10 +71,10 @@ std::string GvdOccupancyPublisher::printInfo() const {
 }
 
 void GvdOccupancyPublisher::call(uint64_t timestamp_ns,
-                                 const Eigen::Isometry3f& world_T_body,
+                                 const Eigen::Isometry3d& world_T_body,
                                  const places::GvdLayer& gvd,
-                                 const places::GraphExtractorInterface*) const {
-  publish(timestamp_ns, world_T_body.cast<double>(), gvd);
+                                 const places::GraphExtractor&) const {
+  publish(timestamp_ns, world_T_body, gvd);
 }
 
 namespace {

@@ -24,9 +24,9 @@ sinks:
       marker_scale: 0.2
       marker_alpha: 0.9
       use_sphere_marker: true
-      use_label: true
-      label_height: 0.7
-      label_scale: 0.3
+      use_text: true
+      text_height: 0.7
+      text_scale: 0.3
       use_bounding_box: false
       bounding_box_alpha: 0.5
       use_edge_source: false

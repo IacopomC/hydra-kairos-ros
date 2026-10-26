@@ -38,8 +38,12 @@
 #include <gtest/gtest.h>
 #include <hydra/input/lidar.h>
 #include <hydra_ros/input/ros_sensors.h>
-#include <ros/ros.h>
-#include <sensor_msgs/CameraInfo.h>
+#include <ianvs/node_handle.h>
+#include <tf2_ros/static_transform_broadcaster.h>
+
+#include <rclcpp/node.hpp>
+#include <rclcpp/publisher.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 
 #include <Eigen/Geometry>
 
@@ -64,14 +68,15 @@ class RosSensors : public ::testing::Test {
   RosSensors() = default;
   virtual ~RosSensors() = default;
   void SetUp() override {
-    info_pub =
-        nh.advertise<sensor_msgs::CameraInfo>("/some/camera/camera_info", 1, true);
-    sensor_msgs::CameraInfo msg;
+    auto nh = ianvs::NodeHandle::this_node();
+    info_pub = nh.create_publisher<sensor_msgs::msg::CameraInfo>(
+        "/some/camera/camera_info", rclcpp::QoS(1).transient_local());
+    sensor_msgs::msg::CameraInfo msg;
     msg.header.frame_id = "lidar";
     msg.height = 1;
     msg.width = 2;
-    msg.K = {3, 0, 4, 0, 5, 6, 0, 0, 0};
-    info_pub.publish(msg);
+    msg.k = {3, 0, 4, 0, 5, 6, 0, 0, 0};
+    info_pub->publish(msg);
 
     expected_intrinsics.min_range = 10;
     expected_intrinsics.max_range = 15;
@@ -84,13 +89,28 @@ class RosSensors : public ::testing::Test {
 
     expected_extrinsics.body_R_sensor = Eigen::Quaterniond(0.0, 0.0, 1.0, 0.0);
     expected_extrinsics.body_p_sensor << 1.0, 2.0, 3.0;
+
+    tf_pub = std::make_shared<tf2_ros::StaticTransformBroadcaster>(nh.node());
+
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = nh.now();
+    tf.header.frame_id = "base_link";
+    tf.child_frame_id = "lidar";
+    tf.transform.translation.x = 1.0;
+    tf.transform.translation.y = 2.0;
+    tf.transform.translation.z = 3.0;
+    tf.transform.rotation.x = 0.0;
+    tf.transform.rotation.y = 1.0;
+    tf.transform.rotation.z = 0.0;
+    tf.transform.rotation.w = 0.0;
+    tf_pub->sendTransform(tf);
   }
 
   ParamSensorExtrinsics::Config expected_extrinsics;
   Camera::Config expected_intrinsics;
 
-  ros::NodeHandle nh;
-  ros::Publisher info_pub;
+  std::shared_ptr<tf2_ros::StaticTransformBroadcaster> tf_pub;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub;
 };
 
 TEST_F(RosSensors, TestNonCamera) {
@@ -107,7 +127,7 @@ TEST_F(RosSensors, TestNonCamera) {
 
   {  // non-ros should always be the same
     VirtualSensor sensor(config);
-    const auto result = input::loadSensor(sensor, 0);
+    const auto result = input::loadSensor(sensor, "test_lidar");
     ASSERT_TRUE(result);
     EXPECT_EQ(result.getType(), "lidar");
     const auto expected_yaml = getExportedConfig(config);
@@ -116,11 +136,13 @@ TEST_F(RosSensors, TestNonCamera) {
   }
 
   RosExtrinsics::Config extrinsics_config;
+  extrinsics_config.warning_timeout_s = 1.0;
+  extrinsics_config.error_timeout_s = 5.0;
   config.extrinsics = extrinsics_config;
 
   {  // ros without a frame should not be valid
     VirtualSensor sensor(config);
-    const auto result = input::loadSensor(sensor, 0);
+    const auto result = input::loadSensor(sensor, "test_lidar");
     EXPECT_FALSE(result);
   }
 
@@ -129,7 +151,7 @@ TEST_F(RosSensors, TestNonCamera) {
 
   {  // ros without a frame should not be valid
     VirtualSensor sensor(config);
-    const auto result = input::loadSensor(sensor, 0);
+    const auto result = input::loadSensor(sensor, "test_lidar");
     ASSERT_TRUE(result);
     EXPECT_EQ(result.getType(), "lidar");
 
@@ -145,11 +167,14 @@ TEST_F(RosSensors, Camera) {
   config.ns = "/some/camera";
   config.min_range = 10;
   config.max_range = 15;
+  config.warning_timeout_s = 1.0;
+  config.error_timeout_s = 5.0;
+  config.latch_info_sub = true;
   config.extrinsics = IdentitySensorExtrinsics::Config();
 
   {  // should be able to parse intrinsics and extrinsics separately
     VirtualSensor sensor(config);
-    const auto result = input::loadSensor(sensor, 0);
+    const auto result = input::loadSensor(sensor, "test_camera");
     ASSERT_TRUE(result);
     EXPECT_EQ(result.getType(), "camera");
 
@@ -161,11 +186,13 @@ TEST_F(RosSensors, Camera) {
   }
 
   RosExtrinsics::Config extrinsics_config;
+  extrinsics_config.warning_timeout_s = 1.0;
+  extrinsics_config.error_timeout_s = 5.0;
   config.extrinsics = extrinsics_config;
 
   {  // ros without a frame should not be valid
     VirtualSensor sensor(config);
-    const auto result = input::loadSensor(sensor, 0);
+    const auto result = input::loadSensor(sensor, "test_camera");
     ASSERT_TRUE(result);
     EXPECT_EQ(result.getType(), "camera");
 

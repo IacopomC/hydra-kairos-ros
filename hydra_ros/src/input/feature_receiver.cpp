@@ -41,12 +41,9 @@
 #include <hydra/common/global_info.h>
 #include <hydra/common/pipeline_queues.h>
 #include <hydra/frontend/view_selector.h>
+#include <ianvs/node_handle.h>
 
-#include "hydra_ros_build_config.h"
-
-#if defined(HYDRA_USE_SEMANTIC_INFERENCE) && HYDRA_USE_SEMANTIC_INFERENCE
-#include <semantic_inference_msgs/FeatureVectorStamped.h>
-#endif
+#include <semantic_inference_msgs/msg/feature_vector_stamped.hpp>
 
 namespace hydra {
 
@@ -57,38 +54,42 @@ void declare_config(FeatureReceiver::Config& config) {
   field(config.queue_size, "queue_size");
   field(config.tf_lookup, "tf_lookup");
   field(config.sensors_to_exclude, "sensors_to_exclude");
+  field(config.verbosity, "verbosity");
 }
 
-#if defined(HYDRA_USE_SEMANTIC_INFERENCE) && HYDRA_USE_SEMANTIC_INFERENCE
-using semantic_inference_msgs::FeatureVectorStamped;
+using semantic_inference_msgs::msg::FeatureVectorStamped;
 
 struct FeatureSubscriber {
   using Ptr = std::unique_ptr<FeatureSubscriber>;
   using Callback = std::function<PoseStatus(uint64_t)>;
 
-  FeatureSubscriber(ros::NodeHandle& nh,
+  FeatureSubscriber(ianvs::NodeHandle nh,
                     const std::string& sensor_name,
                     const Callback& pose_callback,
-                    size_t queue_size = 10);
+                    size_t queue_size = 10,
+                    size_t verbosity = 0);
 
   void callback(const FeatureVectorStamped& msg);
 
-  ros::Subscriber sub;
+  rclcpp::Subscription<FeatureVectorStamped>::SharedPtr sub;
   const std::string sensor_name;
   const Callback pose_callback;
+  const size_t verbosity;
 };
 
-FeatureSubscriber::FeatureSubscriber(ros::NodeHandle& nh,
+FeatureSubscriber::FeatureSubscriber(ianvs::NodeHandle nh,
                                      const std::string& sensor_name,
                                      const Callback& pose_callback,
-                                     size_t queue_size)
-    : sensor_name(sensor_name), pose_callback(pose_callback) {
+                                     size_t queue_size,
+                                     size_t verbosity)
+    : sensor_name(sensor_name), pose_callback(pose_callback), verbosity(verbosity) {
   const std::string topic = sensor_name + "/feature";
-  sub = nh.subscribe(topic, queue_size, &FeatureSubscriber::callback, this);
+  sub = nh.create_subscription<FeatureVectorStamped>(
+      topic, queue_size, &FeatureSubscriber::callback, this);
 }
 
 void FeatureSubscriber::callback(const FeatureVectorStamped& msg) {
-  const auto timestamp_ns = msg.header.stamp.toNSec();
+  const auto timestamp_ns = rclcpp::Time(msg.header.stamp).nanoseconds();
   const auto& vec = msg.feature.data;
 
   const auto sensor = GlobalInfo::instance().getSensor(sensor_name);
@@ -107,6 +108,8 @@ void FeatureSubscriber::callback(const FeatureVectorStamped& msg) {
       Eigen::Map<const Eigen::VectorXf>(vec.data(), vec.size()),
       GlobalInfo::instance().getSensor(sensor_name).get());
 
+  LOG_IF(INFO, verbosity >= 2) << "Pushing new feature to input queue @ "
+                               << timestamp_ns << "[ns] for '" << sensor_name << "'";
   PipelineQueues::instance().input_features_queue.push(std::move(packet));
 }
 
@@ -116,33 +119,29 @@ void FeatureReceiver::start() {
   const auto sensor_names = GlobalInfo::instance().getAvailableSensors();
   for (const auto& name : sensor_names) {
     if (to_exclude.count(name)) {
+      LOG_IF(INFO, config.verbosity >= 1)
+          << "Excluding '" << name << "' from feature receivers!";
       continue;
     }
 
+    auto nh = ianvs::NodeHandle::this_node(config.ns);
+    LOG_IF(INFO, config.verbosity >= 1)
+        << "Making feature receiver for '" << name << "'";
     subs_.push_back(std::make_unique<FeatureSubscriber>(
-        nh_,
+        nh,
         name,
         [this](uint64_t timestamp_ns) { return lookup_.getBodyPose(timestamp_ns); },
-        config.queue_size));
+        config.queue_size,
+        config.verbosity));
   }
 }
-#else
-
-struct FeatureSubscriber {};
-
-void FeatureReceiver::start() {
-  LOG(ERROR) << "semantic_inference_msgs not found when building, disabled!";
-}
-#endif
 
 FeatureReceiver::FeatureReceiver(const Config& config)
-    : config(config::checkValid(config)), lookup_(config.tf_lookup), nh_(config.ns) {}
+    : config(config::checkValid(config)), lookup_(config.tf_lookup) {}
 
 FeatureReceiver::~FeatureReceiver() {}
 
 void FeatureReceiver::stop() {}
-
-void FeatureReceiver::save(const LogSetup&) {}
 
 std::string FeatureReceiver::printInfo() const { return config::toString(config); }
 
